@@ -34,6 +34,7 @@
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/query_node/update_query_node.hpp"
 #include "duckdb/parser/result_modifier.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
@@ -560,6 +561,11 @@ unique_ptr<TableRef> MySQLCatalog::RemoteExecute(ClientContext &context, unique_
 	// serialize the query node into MySQL-compatible SQL (identifier quoting, type / function
 	// remapping, explicit NULL ordering, ...)
 	return RemoteExecute(context, MySQLSQLWriter::MySQLToString(context, version, *node));
+}
+
+unique_ptr<TableRef> MySQLCatalog::RemoteExecute(ClientContext &context, unique_ptr<SQLStatement> statement) {
+	// TODO: OR REPLACE logic
+	return RemoteExecute(context, MySQLSQLWriter::MySQLToString(context, version, *statement));
 }
 
 unique_ptr<TableRef> MySQLCatalog::RemoteExecute(ClientContext &context, const string &sql) {
@@ -1615,6 +1621,66 @@ bool MySQLCatalog::SupportsPushdown(const QueryNode &node) {
 		return false;
 	default:
 		// unknown query node type
+		return false;
+	}
+}
+
+bool MySQLCatalog::SupportsPushdown(const SQLStatement &statement) {
+	switch (statement.type) {
+	case StatementType::CREATE_STATEMENT: {
+		auto &stmt = statement.Cast<CreateStatement>();
+		CreateInfo &create_info = *stmt.info;
+
+		// entry type
+		switch (create_info.type) {
+		case CatalogType::TABLE_ENTRY: {
+			CreateTableInfo &info = create_info.Cast<CreateTableInfo>();
+
+			// IF EXISTS, OR REPLACE
+			switch (info.on_conflict) {
+			case OnCreateConflict::ERROR_ON_CONFLICT:
+			case OnCreateConflict::IGNORE_ON_CONFLICT:
+				break;
+			default:
+				return false;
+			}
+
+			// constraints
+			for (auto &constr : info.constraints) {
+				switch (constr->type) {
+				case ConstraintType::NOT_NULL:
+				case ConstraintType::UNIQUE:
+				case ConstraintType::FOREIGN_KEY:
+					break;
+				default:
+					return false;
+				}
+			}
+
+			// other options
+			if (info.temporary) {
+				return false;
+			}
+			if (info.internal) {
+				return false;
+			}
+			if (info.partition_keys.size() > 0) {
+				return false;
+			}
+			if (info.sort_keys.size() > 0) {
+				return false;
+			}
+			if (info.options.size() > 0) {
+				return false;
+			}
+
+			return true;
+		}
+		default:
+			return false;
+		}
+	}
+	default:
 		return false;
 	}
 }
